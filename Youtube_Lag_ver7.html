@@ -50,7 +50,7 @@
 <header>
   <h1>
     YouTube Live LAG Logger（單一 HTML）
-    <span class="ver" id="ver">v2026-01-27.tw+8.ms.stall-dual-conservative</span>
+    <span class="ver" id="ver">v2026-01-27.tw+8.ms.stall-dual-conservative.fix-buffering-resume.no-monitor-required</span>
   </h1>
 </header>
 
@@ -105,7 +105,6 @@
     <div class="row" style="margin-top:10px; align-items:center;">
       <button id="btnBg" class="btn-bg">背景執行：OFF</button>
       <button id="btnLoad">載入/播放</button>
-      <button id="btnMonitor">開始監測</button>
       <button id="btnClear">清空事件</button>
       <button id="btnExport" disabled>匯出 CSV</button>
     </div>
@@ -117,18 +116,15 @@
       <div>取樣(上次)</div><div id="stBehindTs">-</div>
       <div>追直播(上次)</div><div id="stCatchupTs">-</div>
       <div>追直播鎖定</div><div id="stCatchArmed">ARMED</div>
-      <div>STALL 偵測(雙條件/保守)</div><div id="stStall">-</div>
+      <div>LAG/STALL</div><div id="stStall">-</div>
       <div>GPS</div><div id="stGps">未授權</div>
-      <div>監測</div><div id="stMon">OFF</div>
       <div>背景模式</div><div id="stBg">OFF</div>
       <div>時間時區</div><div class="mono">UTC+08:00（台灣時間）</div>
     </div>
 
     <div class="muted" style="margin-top:8px;">
-      ✅ <b>雙條件 STALL（保守預設）</b>：<br/>
-      - <span class="mono">currentTime</span> 在 500ms 內前進 <span class="mono">&lt; 0.25s</span> 才算不動<br/>
-      - 且 <span class="mono">behindMs</span> 允許最多變小 150ms（抖動容忍），仍視為「沒變小」<br/>
-      才會累計 stall。
+      ✅ 這版 <b>lag_event 不需要按「監測」</b>，只要播放過一次就會自動記錄。<br/>
+      ✅ <b>BUFFERING → PLAYING</b> 會正確結束 lag 並輸出 lag_event（修掉你遇到的問題）。
     </div>
   </div>
 
@@ -214,7 +210,6 @@ const inpMaxBehindMs = document.getElementById("inpMaxBehindMs");
 
 const btnBg = document.getElementById("btnBg");
 const btnLoad = document.getElementById("btnLoad");
-const btnMonitor = document.getElementById("btnMonitor");
 const btnClear = document.getElementById("btnClear");
 const btnExport = document.getElementById("btnExport");
 
@@ -222,7 +217,6 @@ const stVid = document.getElementById("stVid");
 const stState = document.getElementById("stState");
 const stBehind = document.getElementById("stBehind");
 const stGps = document.getElementById("stGps");
-const stMon = document.getElementById("stMon");
 const stBg = document.getElementById("stBg");
 const stBehindTs = document.getElementById("stBehindTs");
 const stCatchupTs = document.getElementById("stCatchupTs");
@@ -239,13 +233,11 @@ let playerReady = false;
 let currentVideoId = "";
 let pendingVideoId = null;
 
-let monitorOn = false;
-let watchStartUtcMs = null;
-
-let hasPlayedOnceSinceMonitorOn = false;
+let watchStartUtcMs = null;           // 自動：第一次真正播放才設
+let playedOnceEver = false;           // 只要進過 PLAYING 一次就算（避免初始載入誤判）
 
 let lagActive = false;
-let lagMode = "";
+let lagMode = "";                     // "buffering" | "stall"
 let lagStartUtcMs = null;
 let lagStartCt = null;
 let lagStartDu = null;
@@ -258,20 +250,23 @@ let rows = [];
 let lastBehindMs = null;
 let lastBehindAtUtcMs = null;
 
+// catch-up control
 let lastCatchupUtcMs = null;
 let lastPlayingEnterUtcMs = null;
 let catchArmed = true;
 
+// bg mode
 let bgMode = false;
 let wakeLock = null;
 
+// timers
 let tickTimer = null;
 let stallTimer = null;
 
-/** ===== 保守 STALL 偵測參數（你要求） ===== */
+// ===== 保守 STALL 偵測參數 =====
 const STALL_POLL_MS = 500;
-const STALL_EPSILON_SEC = 0.25;   // <-- 更保守：0.25
-const BEHIND_NOISE_TOL_MS = 150;  // <-- 更保守：允許 behind 變小 150ms 仍視為沒變小
+const STALL_EPSILON_SEC = 0.25;
+const BEHIND_NOISE_TOL_MS = 150;
 
 let stallAccumMs = 0;
 let stallLastCt = null;
@@ -307,7 +302,6 @@ function loadSettings() {
   restartTick();
   restartStallDetector();
 }
-
 function saveSettings() {
   localStorage.setItem(LS_KEYS.url, inpUrl.value.trim());
   localStorage.setItem(LS_KEYS.lag, String(getMs(inpLagMs, 5000)));
@@ -512,6 +506,13 @@ function safeGetCurrentTime() { try { return player ? toNum(player.getCurrentTim
 function safeGetDuration()    { try { return player ? toNum(player.getDuration()) : null; } catch { return null; } }
 function safeGetPlayerState() { try { return player && typeof player.getPlayerState === "function" ? player.getPlayerState() : null; } catch { return null; } }
 
+function markWatchStartIfNeeded() {
+  if (!watchStartUtcMs) {
+    watchStartUtcMs = Date.now();
+    addRow({ event: "watch_start", timeTw: nowTwIso(watchStartUtcMs), watchStartTw: nowTwIso(watchStartUtcMs) });
+  }
+}
+
 function updateBehindNow() {
   if (!playerReady || !player) return;
 
@@ -520,9 +521,7 @@ function updateBehindNow() {
   const du = safeGetDuration();
 
   let computed = null;
-  if (ps === 1 && ct != null && du != null && du > 0) {
-    computed = clamp0(computeBehindMs(ct, du));
-  }
+  if (ps === 1 && ct != null && du != null && du > 0) computed = clamp0(computeBehindMs(ct, du));
 
   if (computed != null) {
     lastBehindMs = computed;
@@ -570,7 +569,7 @@ function maybeCatchUp(reason) {
     if (behindMs <= cfg.rearmMs) {
       catchArmed = true;
       render();
-      if (monitorOn) addRow({ event: "catchup_rearm", timeTw: nowTwIso(now), note: `behind=${behindMs}<=rearm=${cfg.rearmMs}` });
+      addRow({ event: "catchup_rearm", timeTw: nowTwIso(now), note: `behind=${behindMs}<=rearm=${cfg.rearmMs}` });
     } else return;
   }
 
@@ -589,33 +588,31 @@ function maybeCatchUp(reason) {
   catchArmed = false;
   render();
 
-  if (monitorOn) {
-    addRow({
-      event: ok ? "catchup_seek" : "catchup_fail",
-      timeTw: nowTwIso(now),
-      note: `reason=${reason}; behind=${behindMs}; catchThr=${cfg.catchThrMs}; rearm=${cfg.rearmMs}; safety=${cfg.safetyMs}; cooldown=${cfg.cooldownMs}; force=${force}`
-    });
-  }
+  addRow({
+    event: ok ? "catchup_seek" : "catchup_fail",
+    timeTw: nowTwIso(now),
+    note: `reason=${reason}; behind=${behindMs}; catchThr=${cfg.catchThrMs}; rearm=${cfg.rearmMs}; safety=${cfg.safetyMs}; cooldown=${cfg.cooldownMs}; force=${force}`
+  });
 }
 
 function startLagSession(mode) {
   if (lagActive) return;
+  if (!playedOnceEver) return; // 避免剛載入還沒播放就誤判
+
   lagActive = true;
   lagMode = mode;
   lagStartUtcMs = Date.now();
   lagStartCt = safeGetCurrentTime();
   lagStartDu = safeGetDuration();
 
-  if (monitorOn) {
-    addRow({
-      event: "lag_start",
-      timeTw: nowTwIso(lagStartUtcMs),
-      lagStartTw: nowTwIso(lagStartUtcMs),
-      ctStart: lagStartCt ?? "",
-      duStart: lagStartDu ?? "",
-      note: `lagMode=${mode}`
-    });
-  }
+  addRow({
+    event: "lag_start",
+    timeTw: nowTwIso(lagStartUtcMs),
+    lagStartTw: nowTwIso(lagStartUtcMs),
+    ctStart: lagStartCt ?? "",
+    duStart: lagStartDu ?? "",
+    note: `lagMode=${mode}`
+  });
   render();
 }
 
@@ -631,36 +628,34 @@ function endLagSessionIfAny(reason) {
   const behindStart = clamp0(computeBehindMs(lagStartCt, lagStartDu));
   const behindResume = clamp0(computeBehindMs(resumeCt, resumeDu));
 
-  if (monitorOn) {
+  addRow({
+    event: "resume",
+    timeTw: nowTwIso(resumeUtc),
+    resumeTw: nowTwIso(resumeUtc),
+    ctResume: resumeCt ?? "",
+    duResume: resumeDu ?? "",
+    note: `lagMode=${lagMode}; reason=${reason}`
+  });
+
+  if (lagMs >= cfg.lagThrMs) {
     addRow({
-      event: "resume",
+      event: "lag_event",
       timeTw: nowTwIso(resumeUtc),
+      lagMs,
+      watchStartTw: watchStartUtcMs ? nowTwIso(watchStartUtcMs) : "",
+      lagStartTw: lagStartUtcMs ? nowTwIso(lagStartUtcMs) : "",
       resumeTw: nowTwIso(resumeUtc),
+      ctStart: lagStartCt ?? "",
+      duStart: lagStartDu ?? "",
       ctResume: resumeCt ?? "",
       duResume: resumeDu ?? "",
+      behindStartMs: behindStart ?? "",
+      behindResumeMs: behindResume ?? "",
+      lat: lastGeo?.lat ?? "",
+      lon: lastGeo?.lon ?? "",
+      acc: lastGeo?.acc ?? "",
       note: `lagMode=${lagMode}; reason=${reason}`
     });
-
-    if (lagMs >= cfg.lagThrMs) {
-      addRow({
-        event: "lag_event",
-        timeTw: nowTwIso(resumeUtc),
-        lagMs,
-        watchStartTw: watchStartUtcMs ? nowTwIso(watchStartUtcMs) : "",
-        lagStartTw: lagStartUtcMs ? nowTwIso(lagStartUtcMs) : "",
-        resumeTw: nowTwIso(resumeUtc),
-        ctStart: lagStartCt ?? "",
-        duStart: lagStartDu ?? "",
-        ctResume: resumeCt ?? "",
-        duResume: resumeDu ?? "",
-        behindStartMs: behindStart ?? "",
-        behindResumeMs: behindResume ?? "",
-        lat: lastGeo?.lat ?? "",
-        lon: lastGeo?.lon ?? "",
-        acc: lastGeo?.acc ?? "",
-        note: `lagMode=${lagMode}; reason=${reason}`
-      });
-    }
   }
 
   lagActive = false;
@@ -675,25 +670,34 @@ function onPlayerStateChange(e) {
   stState.textContent = String(e.data);
   updateBehindNow();
 
+  // PLAYING
   if (e.data === 1) {
     lastPlayingEnterUtcMs = Date.now();
+    playedOnceEver = true;
+    markWatchStartIfNeeded();
+
+    // ✅ 修正：BUFFERING 回到 PLAYING 必須結束 lag
+    if (lagActive && lagMode === "buffering") {
+      endLagSessionIfAny("buffering_to_playing");
+    }
+
     maybeCatchUp("state_playing");
-    if (monitorOn) hasPlayedOnceSinceMonitorOn = true;
     return;
   }
 
+  // BUFFERING
   if (e.data === 3) {
-    if (!monitorOn) return;
-    if (!hasPlayedOnceSinceMonitorOn) return;
+    // 只要曾經播放過，就允許判定 buffering lag
     startLagSession("buffering");
+    return;
   }
 
+  // other states: if lag active, end
   if (lagActive && (e.data === 0 || e.data === 2 || e.data === -1)) {
     endLagSessionIfAny("state_non_playing");
   }
 }
 
-/** ========= Stall detector (Dual Condition, Conservative) ========= */
 function stallPoll() {
   if (!playerReady || !player) {
     stallAccumMs = 0; stallLastCt = null; stallLastBehindMs = null;
@@ -714,7 +718,6 @@ function stallPoll() {
     return;
   }
 
-  // If buffering lag active, skip stall
   if (lagActive && lagMode === "buffering") {
     stallAccumMs = 0;
     stallLastCt = ct;
@@ -740,7 +743,7 @@ function stallPoll() {
 
   if (ctNotMoving && behindNotDecreasing) {
     stallAccumMs += STALL_POLL_MS;
-    if (!lagActive && monitorOn && hasPlayedOnceSinceMonitorOn && stallAccumMs >= cfg.lagThrMs) {
+    if (!lagActive && playedOnceEver && stallAccumMs >= cfg.lagThrMs) {
       startLagSession("stall");
     }
   } else {
@@ -753,7 +756,6 @@ function stallPoll() {
   render();
 }
 
-/** ========= init player ========= */
 async function initPlayer(videoId) {
   await loadYTApiOnce();
   const origin = (location && location.origin && location.origin !== "null") ? location.origin : null;
@@ -766,8 +768,6 @@ async function initPlayer(videoId) {
 
   lagActive = false; lagMode = ""; lagStartUtcMs = null; lagStartCt = null; lagStartDu = null;
   stallAccumMs = 0; stallLastCt = null; stallLastBehindMs = null;
-
-  hasPlayedOnceSinceMonitorOn = false;
 
   lastBehindMs = null; lastBehindAtUtcMs = null;
   stBehind.textContent = "-"; stBehindTs.textContent = "-";
@@ -796,6 +796,10 @@ async function initPlayer(videoId) {
         playerReady = true;
         pillReady.textContent = "Player: Ready";
         pillReady.classList.add("ok");
+
+        // 順手開 GPS（若你不想可刪）
+        ensureGeo().then(ok => { if (ok) startGeoWatch(); });
+
         if (pendingVideoId && typeof player.loadVideoById === "function") {
           const vid = pendingVideoId;
           pendingVideoId = null;
@@ -805,36 +809,11 @@ async function initPlayer(videoId) {
         }
       },
       onStateChange: onPlayerStateChange,
-      onError: (e) => { if (monitorOn) addRow({ event: "player_error", timeTw: nowTwIso(), note: `code=${e.data}` }); }
+      onError: (e) => addRow({ event: "player_error", timeTw: nowTwIso(), note: `code=${e.data}` })
     }
   });
 }
 
-/** ========= Monitor ========= */
-function setMonitor(on) {
-  monitorOn = on;
-  stMon.textContent = on ? "ON" : "OFF";
-  btnMonitor.textContent = on ? "停止監測" : "開始監測";
-
-  lagActive = false; lagMode = ""; lagStartUtcMs = null; lagStartCt = null; lagStartDu = null;
-  stallAccumMs = 0; stallLastCt = null; stallLastBehindMs = null;
-  hasPlayedOnceSinceMonitorOn = false;
-
-  if (on) {
-    if (!watchStartUtcMs) watchStartUtcMs = Date.now();
-    addRow({ event: "watch_start", timeTw: nowTwIso(watchStartUtcMs), watchStartTw: nowTwIso(watchStartUtcMs) });
-
-    const ps = safeGetPlayerState();
-    if (ps === 1) { hasPlayedOnceSinceMonitorOn = true; }
-
-    ensureGeo().then(ok => { if (ok) startGeoWatch(); });
-  } else stopGeoWatch();
-
-  updateBehindNow();
-  render();
-}
-
-/** ========= Background mode ========= */
 function applyBgUi() {
   stBg.textContent = bgMode ? "ON" : "OFF";
   btnBg.textContent = bgMode ? "背景執行：ON" : "背景執行：OFF";
@@ -848,7 +827,6 @@ async function releaseWakeLock() { try { await wakeLock?.release(); } catch {} w
 async function setBgMode(on) { bgMode = !!on; applyBgUi(); saveSettings(); if (bgMode) await acquireWakeLock(); else await releaseWakeLock(); }
 document.addEventListener("visibilitychange", async () => { if (!bgMode) return; if (document.visibilityState === "visible") await acquireWakeLock(); });
 
-/** ========= Timers ========= */
 function stopTick() { if (tickTimer != null) { clearInterval(tickTimer); tickTimer = null; } }
 function startTick() {
   stopTick();
@@ -861,7 +839,6 @@ function stopStallDetector() { if (stallTimer != null) { clearInterval(stallTime
 function startStallDetector() { stopStallDetector(); stallTimer = setInterval(stallPoll, STALL_POLL_MS); }
 function restartStallDetector() { startStallDetector(); }
 
-/** ========= UI actions ========= */
 btnBg.addEventListener("click", async () => { await setBgMode(!bgMode); });
 
 btnLoad.addEventListener("click", async () => {
@@ -871,22 +848,19 @@ btnLoad.addEventListener("click", async () => {
 
   const vid = parseVideoId(inpUrl.value);
   if (!vid) { alert("無法解析 Video ID。"); return; }
-  if (!watchStartUtcMs) watchStartUtcMs = Date.now();
   try { await initPlayer(vid); updateBehindNow(); maybeCatchUp("after_load"); }
   catch (e) { alert("載入 YouTube Player 失敗：" + (e?.message || e)); }
 });
-
-btnMonitor.addEventListener("click", () => { saveSettings(); setMonitor(!monitorOn); });
 
 btnClear.addEventListener("click", () => {
   if (!confirm("確定清空所有事件？")) return;
   rows = [];
   watchStartUtcMs = null;
+  playedOnceEver = false;
 
   lagActive = false; lagMode = ""; lagStartUtcMs = null; lagStartCt = null; lagStartDu = null;
   stallAccumMs = 0; stallLastCt = null; stallLastBehindMs = null;
 
-  hasPlayedOnceSinceMonitorOn = false;
   lastBehindMs = null; lastBehindAtUtcMs = null;
   stBehind.textContent = "-"; stBehindTs.textContent = "-";
   lastCatchupUtcMs = null; stCatchupTs.textContent = "-";
@@ -902,11 +876,9 @@ btnExport.addEventListener("click", () => exportCsv());
   inpCooldownMs, inpDebounceMs, inpSafetyMs, inpMaxBehindMs
 ].forEach(el => el.addEventListener("change", () => { saveSettings(); restartTick(); }));
 
-/** ========= Boot ========= */
 (function boot(){
   loadSettings();
   render();
-  stMon.textContent = "OFF";
   stState.textContent = "-";
   stVid.textContent = "-";
   stBehind.textContent = "-";
