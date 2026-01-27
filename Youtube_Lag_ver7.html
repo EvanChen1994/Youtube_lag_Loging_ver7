@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>YT Live LAG Logger (Single HTML)</title>
+  <title>Youtube_Live_LagLogger ver 9</title>
   <style>
     :root { color-scheme: dark; }
     body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans TC", sans-serif; background:#0b0f14; color:#e8eef7; }
@@ -20,7 +20,7 @@
       border:1px solid #223247; background:#0b0f14; color:#e8eef7;
       outline:none;
     }
-    input[type="number"] { max-width: 240px; }
+    input[type="number"] { max-width: 260px; }
     button {
       padding:10px 12px; border-radius:10px;
       border:1px solid #2a3c55; background:#162235; color:#e8eef7;
@@ -49,8 +49,8 @@
 <body>
 <header>
   <h1>
-    YouTube Live LAG Logger（單一 HTML）
-    <span class="ver" id="ver">v2026-01-27.tw+8.ms.stall-dual-conservative.fix-buffering-resume.no-monitor.required.error-ends-lag</span>
+    Youtube_Live_LagLogger ver 9
+    <span class="ver" id="ver">UTC+08:00 / ms / lag期間不追直播 / error結束lag</span>
   </h1>
 </header>
 
@@ -71,34 +71,34 @@
       </div>
       <div>
         <label>追直播門檻(ms)（落後 >= 就追）</label>
-        <input id="inpCatchMs" type="number" min="0" step="100" value="2500" />
+        <input id="inpCatchMs" type="number" min="0" step="100" value="4500" />
       </div>
       <div>
         <label>回復門檻(ms)（落後 <= 才再允許追）</label>
-        <input id="inpRearmMs" type="number" min="0" step="100" value="1200" />
+        <input id="inpRearmMs" type="number" min="0" step="100" value="1500" />
       </div>
     </div>
 
     <div class="row" style="margin-top:10px;">
       <div>
-        <label>取樣間隔(ms)（預設 3000ms）</label>
+        <label>取樣間隔(ms)</label>
         <input id="inpSampleMs" type="number" min="500" step="100" value="3000" />
       </div>
       <div>
-        <label>追直播冷卻(ms)（預設 10000ms）</label>
-        <input id="inpCooldownMs" type="number" min="0" step="500" value="10000" />
+        <label>追直播冷卻(ms)</label>
+        <input id="inpCooldownMs" type="number" min="0" step="500" value="15000" />
       </div>
       <div>
         <label>追直播防抖(ms)（進入PLAYING後等待）</label>
-        <input id="inpDebounceMs" type="number" min="0" step="100" value="1500" />
+        <input id="inpDebounceMs" type="number" min="0" step="100" value="2000" />
       </div>
       <div>
         <label>安全距離(ms)（seek到 live edge 前留緩衝）</label>
-        <input id="inpSafetyMs" type="number" min="200" step="100" value="1200" />
+        <input id="inpSafetyMs" type="number" min="200" step="100" value="1800" />
       </div>
       <div>
-        <label>最大允許落後(ms)（使用者設定；預設 5000ms=5秒）</label>
-        <input id="inpMaxBehindMs" type="number" min="0" step="500" value="5000" />
+        <label>最大允許落後(ms)（>= 就強制追，避免落後太多）</label>
+        <input id="inpMaxBehindMs" type="number" min="0" step="500" value="10000" />
       </div>
     </div>
 
@@ -115,7 +115,7 @@
       <div>落後(ms)</div><div id="stBehind">-</div>
       <div>取樣(上次)</div><div id="stBehindTs">-</div>
       <div>追直播(上次)</div><div id="stCatchupTs">-</div>
-      <div>追直播鎖定</div><div id="stCatchArmed">ARMED</div>
+      <div>追直播狀態</div><div id="stCatchArmed">ARMED</div>
       <div>LAG/STALL</div><div id="stStall">-</div>
       <div>GPS</div><div id="stGps">未授權</div>
       <div>背景模式</div><div id="stBg">OFF</div>
@@ -123,9 +123,9 @@
     </div>
 
     <div class="muted" style="margin-top:8px;">
-      ✅ 這版 <b>lag_event 不需要按「監測」</b>，只要播放過一次就會自動記錄。<br/>
-      ✅ <b>BUFFERING → PLAYING</b> 會正確結束 lag 並輸出 lag_event。<br/>
-      ✅ <b>Player Error</b>（例如斷網導致錯誤畫面）也會結束 lag，避免卡死不結束。
+      ✅ 目標：抓出「>=5秒 lag」地點為主，因此 <b>lag_start ～ resume/lag_event 期間暫停追直播</b>，避免干擾事件判定。<br/>
+      ✅ BUFFERING→PLAYING 會結束 lag；Player error 也會結束 lag，避免卡死。<br/>
+      ✅ 設定會永久保存在瀏覽器（localStorage）。
     </div>
   </div>
 
@@ -251,17 +251,20 @@ let rows = [];
 let lastBehindMs = null;
 let lastBehindAtUtcMs = null;
 
+// catch-up control
 let lastCatchupUtcMs = null;
 let lastPlayingEnterUtcMs = null;
 let catchArmed = true;
 
+// bg mode
 let bgMode = false;
 let wakeLock = null;
 
+// timers
 let tickTimer = null;
 let stallTimer = null;
 
-// 保守 STALL 偵測參數
+// conservative STALL detector
 const STALL_POLL_MS = 500;
 const STALL_EPSILON_SEC = 0.25;
 const BEHIND_NOISE_TOL_MS = 150;
@@ -272,13 +275,13 @@ let stallLastBehindMs = null;
 
 function getConfig() {
   const lagThrMs = getMs(inpLagMs, 5000);
-  const catchThrMs = getMs(inpCatchMs, 2500);
-  const rearmMs = getMs(inpRearmMs, 1200);
+  const catchThrMs = getMs(inpCatchMs, 4500);
+  const rearmMs = getMs(inpRearmMs, 1500);
   const sampleMs = Math.max(500, getMs(inpSampleMs, 3000));
-  const cooldownMs = getMs(inpCooldownMs, 10000);
-  const debounceMs = getMs(inpDebounceMs, 1500);
-  const safetyMs = Math.max(200, getMs(inpSafetyMs, 1200));
-  const maxBehindMs = getMs(inpMaxBehindMs, 5000);
+  const cooldownMs = getMs(inpCooldownMs, 15000);
+  const debounceMs = getMs(inpDebounceMs, 2000);
+  const safetyMs = Math.max(200, getMs(inpSafetyMs, 1800));
+  const maxBehindMs = getMs(inpMaxBehindMs, 10000);
   return { lagThrMs, catchThrMs, rearmMs, sampleMs, cooldownMs, debounceMs, safetyMs, maxBehindMs };
 }
 
@@ -286,16 +289,16 @@ function loadSettings() {
   const defaultUrl = "https://www.youtube.com/live/KyT4qSK8lJo?si=GudVcyxFxRcNfcqd";
   inpUrl.value = localStorage.getItem(LS_KEYS.url) || defaultUrl;
 
-  inpLagMs.value = String(Number(localStorage.getItem(LS_KEYS.lag) || 5000));
-  inpCatchMs.value = String(Number(localStorage.getItem(LS_KEYS.catch) || 2500));
-  inpRearmMs.value = String(Number(localStorage.getItem(LS_KEYS.rearm) || 1200));
-  inpSampleMs.value = String(Number(localStorage.getItem(LS_KEYS.sample) || 3000));
-  inpCooldownMs.value = String(Number(localStorage.getItem(LS_KEYS.cooldown) || 10000));
-  inpDebounceMs.value = String(Number(localStorage.getItem(LS_KEYS.debounce) || 1500));
-  inpSafetyMs.value = String(Number(localStorage.getItem(LS_KEYS.safety) || 1200));
-  inpMaxBehindMs.value = String(Number(localStorage.getItem(LS_KEYS.maxBehind) || 5000));
-  bgMode = (localStorage.getItem(LS_KEYS.bg) || "0") === "1";
+  inpLagMs.value      = String(Number(localStorage.getItem(LS_KEYS.lag)      || 5000));
+  inpCatchMs.value    = String(Number(localStorage.getItem(LS_KEYS.catch)    || 4500));
+  inpRearmMs.value    = String(Number(localStorage.getItem(LS_KEYS.rearm)    || 1500));
+  inpSampleMs.value   = String(Number(localStorage.getItem(LS_KEYS.sample)   || 3000));
+  inpCooldownMs.value = String(Number(localStorage.getItem(LS_KEYS.cooldown) || 15000));
+  inpDebounceMs.value = String(Number(localStorage.getItem(LS_KEYS.debounce) || 2000));
+  inpSafetyMs.value   = String(Number(localStorage.getItem(LS_KEYS.safety)   || 1800));
+  inpMaxBehindMs.value= String(Number(localStorage.getItem(LS_KEYS.maxBehind)|| 10000));
 
+  bgMode = (localStorage.getItem(LS_KEYS.bg) || "0") === "1";
   applyBgUi();
   restartTick();
   restartStallDetector();
@@ -303,13 +306,13 @@ function loadSettings() {
 function saveSettings() {
   localStorage.setItem(LS_KEYS.url, inpUrl.value.trim());
   localStorage.setItem(LS_KEYS.lag, String(getMs(inpLagMs, 5000)));
-  localStorage.setItem(LS_KEYS.catch, String(getMs(inpCatchMs, 2500)));
-  localStorage.setItem(LS_KEYS.rearm, String(getMs(inpRearmMs, 1200)));
+  localStorage.setItem(LS_KEYS.catch, String(getMs(inpCatchMs, 4500)));
+  localStorage.setItem(LS_KEYS.rearm, String(getMs(inpRearmMs, 1500)));
   localStorage.setItem(LS_KEYS.sample, String(getMs(inpSampleMs, 3000)));
-  localStorage.setItem(LS_KEYS.cooldown, String(getMs(inpCooldownMs, 10000)));
-  localStorage.setItem(LS_KEYS.debounce, String(getMs(inpDebounceMs, 1500)));
-  localStorage.setItem(LS_KEYS.safety, String(getMs(inpSafetyMs, 1200)));
-  localStorage.setItem(LS_KEYS.maxBehind, String(getMs(inpMaxBehindMs, 5000)));
+  localStorage.setItem(LS_KEYS.cooldown, String(getMs(inpCooldownMs, 15000)));
+  localStorage.setItem(LS_KEYS.debounce, String(getMs(inpDebounceMs, 2000)));
+  localStorage.setItem(LS_KEYS.safety, String(getMs(inpSafetyMs, 1800)));
+  localStorage.setItem(LS_KEYS.maxBehind, String(getMs(inpMaxBehindMs, 10000)));
   localStorage.setItem(LS_KEYS.bg, bgMode ? "1" : "0");
 }
 
@@ -402,7 +405,9 @@ function render() {
   countLog.textContent = String(rows.length);
   btnExport.disabled = rows.length === 0;
 
-  stCatchArmed.textContent = catchArmed ? "ARMED" : "DISARMED";
+  if (lagActive) stCatchArmed.textContent = "PAUSED (LAG)";
+  else stCatchArmed.textContent = catchArmed ? "ARMED" : "DISARMED";
+
   stStall.textContent = lagActive ? `LAG(${lagMode})` : (stallAccumMs > 0 ? `STALL_ACCUM=${stallAccumMs}ms` : "-");
 
   tbody.innerHTML = rows.map((r, idx) => {
@@ -548,6 +553,9 @@ function seekToLiveEdgeSafe(safetyMs) {
 }
 
 function maybeCatchUp(reason) {
+  // ✅ 新規則：lag 期間完全不追，避免干擾 lag 記錄
+  if (lagActive) return;
+
   if (!playerReady || !player) return;
   const cfg = getConfig();
   const ps = safeGetPlayerState();
@@ -661,7 +669,11 @@ function endLagSessionIfAny(reason) {
   lagStartUtcMs = null;
   lagStartCt = null;
   lagStartDu = null;
+
   render();
+
+  // ✅ lag 結束後，允許立刻再評估一次是否需要追（但仍受冷卻/armed控制）
+  setTimeout(() => maybeCatchUp("after_lag_end"), 0);
 }
 
 function onPlayerStateChange(e) {
@@ -673,7 +685,7 @@ function onPlayerStateChange(e) {
     playedOnceEver = true;
     markWatchStartIfNeeded();
 
-    // BUFFERING -> PLAYING 必須結束 lag
+    // BUFFERING -> PLAYING 結束 lag
     if (lagActive && lagMode === "buffering") endLagSessionIfAny("buffering_to_playing");
 
     maybeCatchUp("state_playing");
@@ -756,12 +768,11 @@ async function initPlayer(videoId) {
     playerReady = false;
   }
 
+  // reset runtime state
   lagActive = false; lagMode = ""; lagStartUtcMs = null; lagStartCt = null; lagStartDu = null;
   stallAccumMs = 0; stallLastCt = null; stallLastBehindMs = null;
-
   lastBehindMs = null; lastBehindAtUtcMs = null;
   stBehind.textContent = "-"; stBehindTs.textContent = "-";
-
   lastCatchupUtcMs = null; lastPlayingEnterUtcMs = null;
   stCatchupTs.textContent = "-";
   catchArmed = true;
@@ -798,18 +809,11 @@ async function initPlayer(videoId) {
       },
       onStateChange: onPlayerStateChange,
 
-      // ✅ 新增：Player error 也要結束 lag（避免卡死）
+      // ✅ Player error：記錄 + 若正在 lag 則以 error 結束 lag
       onError: (e) => {
         const code = e?.data;
         addRow({ event: "player_error", timeTw: nowTwIso(), note: `code=${code}` });
-
-        if (lagActive) {
-          // 用 error code 當作結束原因
-          endLagSessionIfAny(`player_error_code=${code}`);
-        } else {
-          // 若沒在 lag 中，也可以把「可能斷線」當作一種提示事件
-          //（不會產生 lag_event）
-        }
+        if (lagActive) endLagSessionIfAny(`player_error_code=${code}`);
       }
     }
   });
