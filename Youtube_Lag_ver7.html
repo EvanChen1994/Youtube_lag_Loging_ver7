@@ -50,7 +50,7 @@
 <header>
   <h1>
     YouTube Live LAG Logger（單一 HTML）
-    <span class="ver" id="ver">v2026-01-27.tw+8.ms.stall-dual-conservative.fix-buffering-resume.no-monitor-required</span>
+    <span class="ver" id="ver">v2026-01-27.tw+8.ms.stall-dual-conservative.fix-buffering-resume.no-monitor.required.error-ends-lag</span>
   </h1>
 </header>
 
@@ -124,7 +124,8 @@
 
     <div class="muted" style="margin-top:8px;">
       ✅ 這版 <b>lag_event 不需要按「監測」</b>，只要播放過一次就會自動記錄。<br/>
-      ✅ <b>BUFFERING → PLAYING</b> 會正確結束 lag 並輸出 lag_event（修掉你遇到的問題）。
+      ✅ <b>BUFFERING → PLAYING</b> 會正確結束 lag 並輸出 lag_event。<br/>
+      ✅ <b>Player Error</b>（例如斷網導致錯誤畫面）也會結束 lag，避免卡死不結束。
     </div>
   </div>
 
@@ -233,11 +234,11 @@ let playerReady = false;
 let currentVideoId = "";
 let pendingVideoId = null;
 
-let watchStartUtcMs = null;           // 自動：第一次真正播放才設
-let playedOnceEver = false;           // 只要進過 PLAYING 一次就算（避免初始載入誤判）
+let watchStartUtcMs = null;
+let playedOnceEver = false;
 
 let lagActive = false;
-let lagMode = "";                     // "buffering" | "stall"
+let lagMode = "";
 let lagStartUtcMs = null;
 let lagStartCt = null;
 let lagStartDu = null;
@@ -250,20 +251,17 @@ let rows = [];
 let lastBehindMs = null;
 let lastBehindAtUtcMs = null;
 
-// catch-up control
 let lastCatchupUtcMs = null;
 let lastPlayingEnterUtcMs = null;
 let catchArmed = true;
 
-// bg mode
 let bgMode = false;
 let wakeLock = null;
 
-// timers
 let tickTimer = null;
 let stallTimer = null;
 
-// ===== 保守 STALL 偵測參數 =====
+// 保守 STALL 偵測參數
 const STALL_POLL_MS = 500;
 const STALL_EPSILON_SEC = 0.25;
 const BEHIND_NOISE_TOL_MS = 150;
@@ -597,7 +595,7 @@ function maybeCatchUp(reason) {
 
 function startLagSession(mode) {
   if (lagActive) return;
-  if (!playedOnceEver) return; // 避免剛載入還沒播放就誤判
+  if (!playedOnceEver) return;
 
   lagActive = true;
   lagMode = mode;
@@ -670,29 +668,23 @@ function onPlayerStateChange(e) {
   stState.textContent = String(e.data);
   updateBehindNow();
 
-  // PLAYING
-  if (e.data === 1) {
+  if (e.data === 1) { // PLAYING
     lastPlayingEnterUtcMs = Date.now();
     playedOnceEver = true;
     markWatchStartIfNeeded();
 
-    // ✅ 修正：BUFFERING 回到 PLAYING 必須結束 lag
-    if (lagActive && lagMode === "buffering") {
-      endLagSessionIfAny("buffering_to_playing");
-    }
+    // BUFFERING -> PLAYING 必須結束 lag
+    if (lagActive && lagMode === "buffering") endLagSessionIfAny("buffering_to_playing");
 
     maybeCatchUp("state_playing");
     return;
   }
 
-  // BUFFERING
-  if (e.data === 3) {
-    // 只要曾經播放過，就允許判定 buffering lag
+  if (e.data === 3) { // BUFFERING
     startLagSession("buffering");
     return;
   }
 
-  // other states: if lag active, end
   if (lagActive && (e.data === 0 || e.data === 2 || e.data === -1)) {
     endLagSessionIfAny("state_non_playing");
   }
@@ -743,9 +735,7 @@ function stallPoll() {
 
   if (ctNotMoving && behindNotDecreasing) {
     stallAccumMs += STALL_POLL_MS;
-    if (!lagActive && playedOnceEver && stallAccumMs >= cfg.lagThrMs) {
-      startLagSession("stall");
-    }
+    if (!lagActive && playedOnceEver && stallAccumMs >= cfg.lagThrMs) startLagSession("stall");
   } else {
     if (lagActive && lagMode === "stall") endLagSessionIfAny("stall_recovered");
     stallAccumMs = 0;
@@ -796,8 +786,6 @@ async function initPlayer(videoId) {
         playerReady = true;
         pillReady.textContent = "Player: Ready";
         pillReady.classList.add("ok");
-
-        // 順手開 GPS（若你不想可刪）
         ensureGeo().then(ok => { if (ok) startGeoWatch(); });
 
         if (pendingVideoId && typeof player.loadVideoById === "function") {
@@ -809,7 +797,20 @@ async function initPlayer(videoId) {
         }
       },
       onStateChange: onPlayerStateChange,
-      onError: (e) => addRow({ event: "player_error", timeTw: nowTwIso(), note: `code=${e.data}` })
+
+      // ✅ 新增：Player error 也要結束 lag（避免卡死）
+      onError: (e) => {
+        const code = e?.data;
+        addRow({ event: "player_error", timeTw: nowTwIso(), note: `code=${code}` });
+
+        if (lagActive) {
+          // 用 error code 當作結束原因
+          endLagSessionIfAny(`player_error_code=${code}`);
+        } else {
+          // 若沒在 lag 中，也可以把「可能斷線」當作一種提示事件
+          //（不會產生 lag_event）
+        }
+      }
     }
   });
 }
