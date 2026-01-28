@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Youtube_Live_LagLogger ver 9</title>
+  <title>Youtube_Live_LagLogger ver 9.1</title>
   <style>
     :root { color-scheme: dark; }
     body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans TC", sans-serif; background:#0b0f14; color:#e8eef7; }
@@ -20,7 +20,7 @@
       border:1px solid #223247; background:#0b0f14; color:#e8eef7;
       outline:none;
     }
-    input[type="number"] { max-width: 260px; }
+    input[type="number"] { max-width: 280px; }
     button {
       padding:10px 12px; border-radius:10px;
       border:1px solid #2a3c55; background:#162235; color:#e8eef7;
@@ -50,7 +50,7 @@
 <header>
   <h1>
     Youtube_Live_LagLogger ver 9
-    <span class="ver" id="ver">UTC+08:00 / ms / lag期間不追直播 / error結束lag</span>
+    <span class="ver">UTC+08:00 / ms / 兩層追直播：層1保守(門檻/冷卻)＋層2 lag結束立刻追 / GPS 1秒抓不到用lastGeo(註記)</span>
   </h1>
 </header>
 
@@ -70,11 +70,11 @@
         <input id="inpLagMs" type="number" min="0" step="100" value="5000" />
       </div>
       <div>
-        <label>追直播門檻(ms)（落後 >= 就追）</label>
+        <label>追直播門檻(ms)（層1：落後 >= 就追）</label>
         <input id="inpCatchMs" type="number" min="0" step="100" value="4500" />
       </div>
       <div>
-        <label>回復門檻(ms)（落後 <= 才再允許追）</label>
+        <label>回復門檻(ms)（層1：落後 <= 才再允許追）</label>
         <input id="inpRearmMs" type="number" min="0" step="100" value="1500" />
       </div>
     </div>
@@ -85,20 +85,20 @@
         <input id="inpSampleMs" type="number" min="500" step="100" value="3000" />
       </div>
       <div>
-        <label>追直播冷卻(ms)</label>
+        <label>追直播冷卻(ms)（層1）</label>
         <input id="inpCooldownMs" type="number" min="0" step="500" value="15000" />
       </div>
       <div>
-        <label>追直播防抖(ms)（進入PLAYING後等待）</label>
+        <label>追直播防抖(ms)（進入PLAYING後等待；層1）</label>
         <input id="inpDebounceMs" type="number" min="0" step="100" value="2000" />
       </div>
       <div>
-        <label>安全距離(ms)（seek到 live edge 前留緩衝）</label>
-        <input id="inpSafetyMs" type="number" min="200" step="100" value="1800" />
+        <label>安全距離(ms)（seek 到 duration-安全距離；更穩）</label>
+        <input id="inpSafetyMs" type="number" min="0" step="50" value="1500" />
       </div>
       <div>
-        <label>最大允許落後(ms)（>= 就強制追，避免落後太多）</label>
-        <input id="inpMaxBehindMs" type="number" min="0" step="500" value="10000" />
+        <label>最大允許落後(ms)（層1：>= 就強制追）</label>
+        <input id="inpMaxBehindMs" type="number" min="0" step="500" value="7000" />
       </div>
     </div>
 
@@ -124,9 +124,10 @@
     </div>
 
     <div class="muted" style="margin-top:8px;">
-      ✅ 目標：抓出「>=5秒 lag」地點為主，因此 <b>lag_start ～ resume/lag_event 期間暫停追直播</b>，避免干擾事件判定。<br/>
-      ✅ BUFFERING→PLAYING 會結束 lag；Player error 也會結束 lag，避免卡死。<br/>
-      ✅ 設定會永久保存在瀏覽器（localStorage）。按「恢復預設」會清掉儲存並套用 ver 9 建議值。
+      ✅ 兩層策略：<br/>
+      - <b>層1（保守維持Live）</b>：只有落後 >=「追直播門檻」或 >=「最大允許落後」才追，且受冷卻/防抖/回復門檻管控。<br/>
+      - <b>層2（lag結束立刻追）</b>：當 lag 結束（resume）且已完成記錄後，立刻追一次到最新（不受層1冷卻與armed限制），確保永遠回到直播中。<br/>
+      ✅ lag 期間不追，避免污染 lag_event。
     </div>
   </div>
 
@@ -183,7 +184,7 @@ const LS_KEYS = {
   bg: "ytlag_bg_mode"
 };
 
-// ✅ ver 9 建議預設值（會被「恢復預設」套用）
+// ✅ ver 9（兩層追直播）保守預設：主抓 >=5秒 lag，又能保持接近live
 const DEFAULTS_V9 = {
   url: "https://www.youtube.com/live/KyT4qSK8lJo?si=GudVcyxFxRcNfcqd",
   lagMs: 5000,
@@ -192,10 +193,13 @@ const DEFAULTS_V9 = {
   sampleMs: 3000,
   cooldownMs: 15000,
   debounceMs: 2000,
-  safetyMs: 1800,
-  maxBehindMs: 10000,
+  safetyMs: 1500,
+  maxBehindMs: 7000,
   bgMode: false
 };
+
+// 層2：lag結束後立即追的最小間隔（避免同一波狀態抖動造成連續觸發）
+const AFTER_LAG_FORCE_GUARD_MS = 2000;
 
 const TZ_OFFSET_MS = 8 * 60 * 60 * 1000;
 function nowTwIso(ms = Date.now()) {
@@ -203,7 +207,6 @@ function nowTwIso(ms = Date.now()) {
   return d.toISOString().replace("Z", "+08:00");
 }
 
-function toNum(x) { const n = Number(x); return Number.isFinite(n) ? n : null; }
 function computeBehindMs(ct, du) { if (ct == null || du == null) return null; return Math.round((du - ct) * 1000); }
 function clamp0(n) { return (n == null || !Number.isFinite(n)) ? null : Math.max(0, n); }
 function escapeHtml(s) {
@@ -267,10 +270,13 @@ let rows = [];
 let lastBehindMs = null;
 let lastBehindAtUtcMs = null;
 
-// catch-up control
+// 層1：catch-up control
 let lastCatchupUtcMs = null;
 let lastPlayingEnterUtcMs = null;
 let catchArmed = true;
+
+// 層2：lag結束立刻追 guard
+let lastAfterLagForceUtcMs = null;
 
 // bg mode
 let bgMode = false;
@@ -296,7 +302,7 @@ function getConfig() {
   const sampleMs = Math.max(500, getMs(inpSampleMs, DEFAULTS_V9.sampleMs));
   const cooldownMs = getMs(inpCooldownMs, DEFAULTS_V9.cooldownMs);
   const debounceMs = getMs(inpDebounceMs, DEFAULTS_V9.debounceMs);
-  const safetyMs = Math.max(200, getMs(inpSafetyMs, DEFAULTS_V9.safetyMs));
+  const safetyMs = Math.max(0, getMs(inpSafetyMs, DEFAULTS_V9.safetyMs));
   const maxBehindMs = getMs(inpMaxBehindMs, DEFAULTS_V9.maxBehindMs);
   return { lagThrMs, catchThrMs, rearmMs, sampleMs, cooldownMs, debounceMs, safetyMs, maxBehindMs };
 }
@@ -375,6 +381,7 @@ async function ensureGeo() {
   if (!navigator.geolocation) { stGps.textContent = "此瀏覽器不支援定位"; return false; }
   return true;
 }
+
 function startGeoWatch() {
   if (!navigator.geolocation || geoWatchId != null) return;
   geoWatchId = navigator.geolocation.watchPosition(
@@ -386,9 +393,21 @@ function startGeoWatch() {
     { enableHighAccuracy: true, maximumAge: 2000, timeout: 8000 }
   );
 }
-function stopGeoWatch() {
-  if (geoWatchId != null && navigator.geolocation) navigator.geolocation.clearWatch(geoWatchId);
-  geoWatchId = null;
+
+function getFreshGeoOnce({ timeoutMs = 1000, highAccuracy = true } = {}) {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({
+        lat: pos.coords.latitude,
+        lon: pos.coords.longitude,
+        acc: pos.coords.accuracy,
+        tUtcMs: Date.now()
+      }),
+      () => resolve(null),
+      { enableHighAccuracy: highAccuracy, maximumAge: 0, timeout: timeoutMs }
+    );
+  });
 }
 
 function addRow(partial) {
@@ -522,8 +541,8 @@ function loadYTApiOnce() {
   return ytApiPromise;
 }
 
-function safeGetCurrentTime() { try { return player ? toNum(player.getCurrentTime()) : null; } catch { return null; } }
-function safeGetDuration()    { try { return player ? toNum(player.getDuration()) : null; } catch { return null; } }
+function safeGetCurrentTime() { try { return player ? Number(player.getCurrentTime()) : null; } catch { return null; } }
+function safeGetDuration()    { try { return player ? Number(player.getDuration()) : null; } catch { return null; } }
 function safeGetPlayerState() { try { return player && typeof player.getPlayerState === "function" ? player.getPlayerState() : null; } catch { return null; } }
 
 function markWatchStartIfNeeded() {
@@ -559,21 +578,65 @@ function updateBehindNow() {
   }
 }
 
-function seekToLiveEdgeSafe(safetyMs) {
+/**
+ * ✅ seek helper：更穩的方式是 seek 到 duration - safetyMs
+ * - safetyMs=1500 代表留 1.5 秒緩衝，降低追到最尾端造成 buffering 的機率
+ */
+function seekToLiveEdgeStable(safetyMs) {
   if (!player) return false;
   const du = safeGetDuration();
-  if (du == null || du <= 0) return false;
+  if (du == null || !Number.isFinite(du) || du <= 0) return false;
 
-  const safetySec = Math.max(0.2, safetyMs / 1000);
-  const target = Math.max(0, du - safetySec);
+  const safetySec = Math.max(0, safetyMs) / 1000;
+  const target = Math.max(0, du - Math.max(0.2, safetySec));
   try { player.seekTo(target, true); return true; } catch { return false; }
 }
 
-function maybeCatchUp(reason) {
-  // ✅ 新規則：lag 期間完全不追，避免干擾 lag 記錄
+/**
+ * ✅ 層2：lag 結束後立刻追（不受層1 cooldown/armed 限制）
+ * - 仍有一個 guard，避免 resume 狀態抖動導致連續追
+ * - 追直播的事件仍寫成 catchup_seek（note 會標明 layer=2）
+ */
+async function forceCatchUpAfterLagEnd(reason) {
+  if (!playerReady || !player) return;
   if (lagActive) return;
 
+  const now = Date.now();
+  if (lastAfterLagForceUtcMs != null && (now - lastAfterLagForceUtcMs) < AFTER_LAG_FORCE_GUARD_MS) return;
+
+  const cfg = getConfig();
+  const ok = seekToLiveEdgeStable(cfg.safetyMs);
+  lastAfterLagForceUtcMs = now;
+  stCatchupTs.textContent = nowTwIso(now);
+
+  // 事件時間固定用 now；GPS 1 秒抓不到用 lastGeo
+  const fresh = await getFreshGeoOnce({ timeoutMs: 1000, highAccuracy: true });
+  let geo = null;
+  let gpsType = "none";
+  if (fresh) { geo = fresh; gpsType = "getCurrentPosition"; }
+  else if (lastGeo) { geo = lastGeo; gpsType = "lastGeo"; }
+
+  addRow({
+    event: ok ? "catchup_seek" : "catchup_fail",
+    timeTw: nowTwIso(now),
+    lat: geo?.lat ?? "",
+    lon: geo?.lon ?? "",
+    acc: geo?.acc ?? "",
+    note: `layer=2; reason=${reason}; seek=duration-safety; safetyMs=${cfg.safetyMs}; gpsType=${gpsType}`
+  });
+}
+
+function runCatchUp(reason) {
+  Promise.resolve(maybeCatchUpLayer1(reason)).catch((e) => console.warn("maybeCatchUpLayer1 error:", e));
+}
+
+/**
+ * ✅ 層1：保守維持 live（受 cooldown / debounce / armed / rearm）
+ */
+async function maybeCatchUpLayer1(reason) {
+  if (lagActive) return;
   if (!playerReady || !player) return;
+
   const cfg = getConfig();
   const ps = safeGetPlayerState();
   if (ps !== 1) return;
@@ -588,33 +651,42 @@ function maybeCatchUp(reason) {
   const behindMs = clamp0(computeBehindMs(ct, du));
   if (behindMs == null) return;
 
+  // rearm
   if (!catchArmed) {
     if (behindMs <= cfg.rearmMs) {
       catchArmed = true;
       render();
-      addRow({ event: "catchup_rearm", timeTw: nowTwIso(now), note: `behind=${behindMs}<=rearm=${cfg.rearmMs}` });
+      addRow({ event: "catchup_rearm", timeTw: nowTwIso(now), note: `layer=1; behind=${behindMs}<=rearm=${cfg.rearmMs}` });
     } else return;
   }
 
-  if (behindMs < cfg.catchThrMs) return;
-
+  // 觸發條件：落後 >= catchThr 或 強制 >= maxBehind
   const force = (cfg.maxBehindMs > 0 && behindMs >= cfg.maxBehindMs);
-  if (!force && lastCatchupUtcMs != null && (now - lastCatchupUtcMs) < cfg.cooldownMs) return;
+  if (!force && behindMs < cfg.catchThrMs) return;
 
-  const minUseful = Math.max(cfg.catchThrMs, cfg.safetyMs);
-  if (behindMs < minUseful) return;
+  // cooldown（force 仍尊重：避免一直追）
+  if (lastCatchupUtcMs != null && (now - lastCatchupUtcMs) < cfg.cooldownMs) return;
 
-  const ok = seekToLiveEdgeSafe(cfg.safetyMs);
+  const ok = seekToLiveEdgeStable(cfg.safetyMs);
   lastCatchupUtcMs = now;
   stCatchupTs.textContent = nowTwIso(now);
 
   catchArmed = false;
   render();
 
+  const fresh = await getFreshGeoOnce({ timeoutMs: 1000, highAccuracy: true });
+  let geo = null;
+  let gpsType = "none";
+  if (fresh) { geo = fresh; gpsType = "getCurrentPosition"; }
+  else if (lastGeo) { geo = lastGeo; gpsType = "lastGeo"; }
+
   addRow({
     event: ok ? "catchup_seek" : "catchup_fail",
     timeTw: nowTwIso(now),
-    note: `reason=${reason}; behind=${behindMs}; catchThr=${cfg.catchThrMs}; rearm=${cfg.rearmMs}; safety=${cfg.safetyMs}; cooldown=${cfg.cooldownMs}; force=${force}`
+    lat: geo?.lat ?? "",
+    lon: geo?.lon ?? "",
+    acc: geo?.acc ?? "",
+    note: `layer=1; reason=${reason}; behind=${behindMs}; catchThr=${cfg.catchThrMs}; maxBehind=${cfg.maxBehindMs}; cooldown=${cfg.cooldownMs}; safetyMs=${cfg.safetyMs}; force=${force}; gpsType=${gpsType}`
   });
 }
 
@@ -681,7 +753,9 @@ function endLagSessionIfAny(reason) {
     });
   }
 
+  // clear lag flags
   lagActive = false;
+  const endedMode = lagMode;
   lagMode = "";
   lagStartUtcMs = null;
   lagStartCt = null;
@@ -689,8 +763,10 @@ function endLagSessionIfAny(reason) {
 
   render();
 
-  // ✅ lag 結束後，允許立刻再評估一次是否需要追（但仍受冷卻/armed控制）
-  setTimeout(() => maybeCatchUp("after_lag_end"), 0);
+  // ✅ 層2：lag 結束後立刻追（先記錄完再追）
+  // - 不管 lagMs 是否 >= lagThr，都追一次，讓直播永遠回到最新
+  // - 如果你只想「>=lagThr 才追」，把這行包在 if (lagMs>=cfg.lagThrMs)
+  setTimeout(() => { forceCatchUpAfterLagEnd(`after_lag_end(${endedMode})`); }, 0);
 }
 
 function onPlayerStateChange(e) {
@@ -702,10 +778,10 @@ function onPlayerStateChange(e) {
     playedOnceEver = true;
     markWatchStartIfNeeded();
 
-    // BUFFERING -> PLAYING 結束 lag
     if (lagActive && lagMode === "buffering") endLagSessionIfAny("buffering_to_playing");
 
-    maybeCatchUp("state_playing");
+    // 層1：保守維持 live
+    runCatchUp("state_playing");
     return;
   }
 
@@ -785,7 +861,7 @@ async function initPlayer(videoId) {
     playerReady = false;
   }
 
-  // reset runtime state (不清事件)
+  // reset runtime state (keep logs)
   lagActive = false; lagMode = ""; lagStartUtcMs = null; lagStartCt = null; lagStartDu = null;
   stallAccumMs = 0; stallLastCt = null; stallLastBehindMs = null;
   lastBehindMs = null; lastBehindAtUtcMs = null;
@@ -793,6 +869,7 @@ async function initPlayer(videoId) {
   lastCatchupUtcMs = null; lastPlayingEnterUtcMs = null;
   stCatchupTs.textContent = "-";
   catchArmed = true;
+  lastAfterLagForceUtcMs = null;
 
   if (player) {
     currentVideoId = videoId;
@@ -825,8 +902,6 @@ async function initPlayer(videoId) {
         }
       },
       onStateChange: onPlayerStateChange,
-
-      // ✅ Player error：記錄 + 若正在 lag 則以 error 結束 lag
       onError: (e) => {
         const code = e?.data;
         addRow({ event: "player_error", timeTw: nowTwIso(), note: `code=${code}` });
@@ -860,7 +935,7 @@ function stopTick() { if (tickTimer != null) { clearInterval(tickTimer); tickTim
 function startTick() {
   stopTick();
   const cfg = getConfig();
-  tickTimer = setInterval(() => { updateBehindNow(); maybeCatchUp("tick"); }, cfg.sampleMs);
+  tickTimer = setInterval(() => { updateBehindNow(); runCatchUp("tick"); }, cfg.sampleMs);
 }
 function restartTick() { startTick(); }
 
@@ -868,9 +943,7 @@ function stopStallDetector() { if (stallTimer != null) { clearInterval(stallTime
 function startStallDetector() { stopStallDetector(); stallTimer = setInterval(stallPoll, STALL_POLL_MS); }
 function restartStallDetector() { startStallDetector(); }
 
-// ✅ 恢復預設（清除 localStorage 並套用 ver 9 建議值）
 async function resetToDefaultsV9() {
-  // 1) UI 寫回預設
   inpUrl.value = DEFAULTS_V9.url;
   inpLagMs.value = String(DEFAULTS_V9.lagMs);
   inpCatchMs.value = String(DEFAULTS_V9.catchMs);
@@ -881,20 +954,14 @@ async function resetToDefaultsV9() {
   inpSafetyMs.value = String(DEFAULTS_V9.safetyMs);
   inpMaxBehindMs.value = String(DEFAULTS_V9.maxBehindMs);
 
-  // 2) 清掉 localStorage（避免下次載入又被舊值覆蓋）
   Object.values(LS_KEYS).forEach(k => localStorage.removeItem(k));
-
-  // 3) 背景模式恢復 OFF（含 wakelock）
   await setBgMode(false);
-
-  // 4) 重新套用（會寫回新的預設到 localStorage）
   saveSettings();
 
-  // 5) 重新啟動取樣/偵測
   restartTick();
   restartStallDetector();
 
-  addRow({ event: "reset_defaults", timeTw: nowTwIso(), note: "reset to Youtube_Live_LagLogger ver 9 defaults" });
+  addRow({ event: "reset_defaults", timeTw: nowTwIso(), note: "reset to Youtube_Live_LagLogger ver 9 defaults (two-layer catchup)" });
 }
 
 btnBg.addEventListener("click", async () => { await setBgMode(!bgMode); });
@@ -906,7 +973,7 @@ btnLoad.addEventListener("click", async () => {
 
   const vid = parseVideoId(inpUrl.value);
   if (!vid) { alert("無法解析 Video ID。"); return; }
-  try { await initPlayer(vid); updateBehindNow(); maybeCatchUp("after_load"); }
+  try { await initPlayer(vid); updateBehindNow(); runCatchUp("after_load"); }
   catch (e) { alert("載入 YouTube Player 失敗：" + (e?.message || e)); }
 });
 
@@ -928,6 +995,7 @@ btnClear.addEventListener("click", () => {
   stBehind.textContent = "-"; stBehindTs.textContent = "-";
   lastCatchupUtcMs = null; stCatchupTs.textContent = "-";
   catchArmed = true;
+  lastAfterLagForceUtcMs = null;
 
   render();
 });
