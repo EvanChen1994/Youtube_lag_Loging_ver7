@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CSV Fetch Test</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif; padding: 16px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button { padding: 8px 12px; cursor: pointer; }
+    code { background: #f3f3f3; padding: 2px 6px; border-radius: 6px; }
+    table { border-collapse: collapse; margin-top: 12px; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 8px; }
+    th { background: #fafafa; text-align: left; }
+    .ok { color: #0a7; }
+    .err { color: #c00; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>CSV 讀取測試</h1>
+
+  <div class="row">
+    <button id="btnReload">重新讀取 data.csv</button>
+    <span id="status" class="muted">尚未讀取</span>
+  </div>
+
+  <p class="muted">
+    讀取路徑：<code id="path">./data.csv</code>（會加上 <code>?v=timestamp</code> 防快取）
+  </p>
+
+  <div id="preview"></div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const previewEl = document.getElementById('preview');
+    const btn = document.getElementById('btnReload');
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function parseCsvSimple(csvText) {
+      // 簡易 CSV parser：適合這種不含逗號/引號的 demo
+      const lines = csvText.trim().split(/\r?\n/).filter(Boolean);
+      const rows = lines.map(line => line.split(','));
+      return rows;
+    }
+
+    function renderTable(rows) {
+      if (!rows || rows.length === 0) return '<p class="err">CSV 是空的</p>';
+      const header = rows[0];
+      const body = rows.slice(1);
+
+      const thead = `<thead><tr>${header.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>`;
+      const tbody = `<tbody>${body.map(r => `<tr>${r.map(c => `<td>${escapeHtml(c ?? '')}</td>`).join('')}</tr>`).join('')}</tbody>`;
+      return `<table>${thead}${tbody}</table>`;
+    }
+
+    async function loadCsv() {
+      const url = `./data.csv?v=${Date.now()}`; // 防快取：每次刷新 URL 都不同
+      statusEl.className = 'muted';
+      statusEl.textContent = `讀取中：${url}`;
+
+      try {
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+
+        const text = await res.text();
+        const rows = parseCsvSimple(text);
+
+        previewEl.innerHTML = renderTable(rows);
+        statusEl.className = 'ok';
+        statusEl.textContent = `讀取成功（${new Date().toLocaleString()}）`;
+      } catch (err) {
+        previewEl.innerHTML = `<pre class="err">${escapeHtml(err?.stack || err)}</pre>`;
+        statusEl.className = 'err';
+        statusEl.textContent = `讀取失敗：${err?.message || err}`;
+      }
+    }
+
+    btn.addEventListener('click', loadCsv);
+    loadCsv(); // 頁面一開就讀一次
+  </script>
+</body>
+</html>

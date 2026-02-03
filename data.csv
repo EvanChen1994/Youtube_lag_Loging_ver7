@@ -1,0 +1,5 @@
+time,event,value
+2026-02-03 10:00:01,lag_start,5
+2026-02-03 10:00:06,resume,5
+2026-02-03 10:00:12,lag_event,5
+2026-02-03 10:00:20,catchup_seek,5
